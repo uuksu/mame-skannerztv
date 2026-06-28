@@ -125,7 +125,9 @@ doPlayer(player)
                          r1 = 79
                          while(--r1 >= 0)
                          while(P_UART_Status & TXBUSY)
-                         break
+                         // NOTE: no break here — falls through to P_UART_TxBuf = 3
+                         // (pseudocode previously had a wrong 'break' at this point;
+                         //  disassembly at 0x1cf01 shows 'je 1cf04' sends 0x03)
                     else break
                else break
                P_UART_Ctrl &= ~RxEn
@@ -352,6 +354,7 @@ private:
 	// Slots  0-79: monster types; slots 80-99: item types.
 	static const uint16_t s_mi_cheat[100];
 
+	uint16_t skz_porta_r();
 	void porta_out_w(offs_t offset, uint16_t data, uint16_t mem_mask = ~0);
 	void uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t mem_mask);
 	TIMER_CALLBACK_MEMBER(byte2_tick);
@@ -391,6 +394,21 @@ void skannerztv_state::machine_reset()
 	m_save_byte = 0;
 	m_byte2_pending = 0;
 	m_last_probe_time = attotime::never;
+}
+
+// When the scanner is connected (byte_1238 bit 4 set), the game reads
+// directional input from byte_1234[0] (scanner BLO) instead of IOA.  SCAN1
+// shares PORT_PLAYER(1) joystick keys with the P1 IOA port, so arrow keys
+// would double-fire through both paths simultaneously.  Suppress the four IOA
+// directional bits while the scanner is connected so only the scanner BLO path
+// is active; A/B (bits 8/9) are left alone since the game may still use them.
+uint16_t skannerztv_state::skz_porta_r()
+{
+	uint16_t val = base_porta_r(0, ~0);
+	uint16_t byte1238 = m_maincpu->space(AS_PROGRAM).read_word(0x1238);
+	if (byte1238 & 0x10) // bit 4 = player 1 scanner connected
+		val |= 0x009c;   // force UP(4)/DOWN(7)/LEFT(3)/RIGHT(2) high = not pressed
+	return val;
 }
 
 // Track IOA writes: bit 0 selects scanner 1, bit 1 selects scanner 2.
@@ -440,9 +458,15 @@ const uint16_t skannerztv_state::s_mi_cheat[100] = {
 // Protocol (per Tahg's reverse engineering, see file header pseudocode):
 //   0x01          → 0x02          (probe ACK)
 //   n|0x80 n=0..99 → HI, LO      (M/I load: monster/item type IDs)
-//   0x03          → BLO, BHI     (button poll)
+//   0x03          → BHI, BLO     (button poll; BHI unused, BLO has button bits)
 //   0x04          → 0x05         (save request ACK)
 //   n|0x80, HI, LO (save mode) → 0x06 per slot (save ACK, 100 slots total)
+//
+// Two-player handshake (from disassembly of 0x1cd43-0x1d2e0):
+//   Both players probe in sequence: player 1 first, then player 2 after player 1
+//   connects (byte_1238 bit 0 set).  We re-enter state 1 for player 2's probe.
+//   After both connect (bits 0+1), function 0x1d261 clears them and button
+//   polling resumes; each player's case 4 sends 0x03 independently.
 void skannerztv_state::uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t mem_mask)
 {
 	uint8_t tx = data & 0xff;
@@ -451,14 +475,11 @@ void skannerztv_state::uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t me
 
 	if (tx == 0x01)
 	{
-		// Only respond during probe phase. Once M/I loading starts we ignore all
-		// further probes — the "losing" player keeps re-probing and responding
-		// would inject spurious 0x02 bytes that corrupt the M/I data stream.
-		//
-		// Dedup: both doPlayer(1) and doPlayer(2) write TXBUF=0x01 at the same
-		// machine timestamp.  One ACK per distinct timestamp → exactly one 0x02
-		// in UARTBuffer for whichever player's state-1 check runs first.
-		if (m_vsk_state == 0)
+		// State 0: player 1 initial probe.
+		// State 2: player 2 probe (after player 1 connected, IRQ now only calls
+		//   doPlayer(2)).  Re-enter M/I loading so player 2 connects too, which
+		//   lets 0x1d261 see both bits set and re-enable button polling.
+		if (m_vsk_state == 0 || m_vsk_state == 2)
 		{
 			attotime now = machine().time();
 			if (now != m_last_probe_time)
@@ -498,12 +519,22 @@ void skannerztv_state::uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t me
 	}
 	else if (tx == 0x03)
 	{
-		// Button poll: BLO immediately, BHI (unused) via timer.
-		int ch = (m_porta_data & 2) ? 1 : 0;
-		optional_ioport &scan = (ch == 0) ? m_io_scan1 : m_io_scan2;
+		// Button poll: scanner replies BHI first, then BLO (see protocol header).
+		// case 5 stores first received byte → byte_1242 (BHI, unused),
+		//                  second received byte → byte_1234 (BLO, read by game).
+		//
+		// Distinguish player 1 vs player 2 via byte_1238 in RAM:
+		//   case 4 sets bit 2 (0x04) for player 1, bit 3 (0x08) for player 2,
+		//   each before writing 0x03 to TXBUF.  These bits are mutually exclusive
+		//   at the tap point (case 5 clears them after each player's poll).
+		// Player 2's BLO is forced to 0: it only needs to complete the cycle so
+		// that byte_1238 bit 1 gets re-set and 0x1d261 can fire again.
+		uint16_t byte1238 = m_maincpu->space(AS_PROGRAM).read_word(0x1238);
+		bool player2 = (byte1238 & 0x08) && !(byte1238 & 0x04);
+		optional_ioport &scan = player2 ? m_io_scan2 : m_io_scan1;
 		uint8_t blo = scan.found() ? (scan->read() & 0x3f) : 0;
-		m_maincpu->uart_rx_force(blo);
-		m_byte2_pending = 0x00;
+		m_maincpu->uart_rx_force(0x00);   // BHI first → byte_1242 (unused)
+		m_byte2_pending = blo;             // BLO second → byte_1234 (game reads this)
 		m_byte2_timer->adjust(attotime::from_usec(500));
 	}
 	else if (tx >= 0x80 && tx <= 0xe3 && m_vsk_state == 1)
@@ -596,7 +627,7 @@ void skannerztv_state::rad_sktv(machine_config &config)
 
 	spg2xx_base(config);
 
-	m_maincpu->porta_in().set(FUNC(skannerztv_state::base_porta_r));
+	m_maincpu->porta_in().set(FUNC(skannerztv_state::skz_porta_r));
 	m_maincpu->porta_out().set(FUNC(skannerztv_state::porta_out_w));
 	m_maincpu->portb_in().set(FUNC(skannerztv_state::base_portb_r));
 	m_maincpu->portc_in().set(FUNC(skannerztv_state::base_portc_r));
