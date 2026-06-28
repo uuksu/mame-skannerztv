@@ -72,6 +72,7 @@ public:
 
 	void extint_w(int channel, bool state) { m_spg_io->extint_w(channel, state); }
 	void uart_rx(uint8_t data) { m_spg_io->uart_rx(data); }
+	void uart_rx_force(uint8_t data) { m_spg_io->uart_rx_force(data); }
 	void spi_rx(int state) { m_spg_io->spi_rx(state); }
 
 	void vblank(int state) { m_spg_video->vblank(state); }

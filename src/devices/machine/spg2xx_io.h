@@ -31,6 +31,7 @@ public:
 	auto chip_select() { return m_chip_sel.bind(); }
 
 	void uart_rx(uint8_t data);
+	void uart_rx_force(uint8_t data);
 	void spi_rx(int state);
 
 	void extint_w(int channel, bool state);

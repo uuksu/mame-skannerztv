@@ -33,8 +33,8 @@ Bit 7     Unused
 BHI:      Unused
 
 Port A
-Bit 0     Enable "Left" Controller
-Bit 1     Enable "Right" Controller
+Bit 0     Enable "Left" Controller (Scanner 1 / Player 1)
+Bit 1     Enable "Right" Controller (Scanner 2 / Player 2)
 
 Player
 0:
@@ -299,20 +299,164 @@ class skannerztv_state : public spg2xx_game_state
 {
 public:
 	skannerztv_state(const machine_config &mconfig, device_type type, const char *tag) :
-		spg2xx_game_state(mconfig, type, tag)
-	{ }
+		spg2xx_game_state(mconfig, type, tag),
+		m_io_scan1(*this, "SCAN1"),
+		m_io_scan2(*this, "SCAN2"),
+		m_porta_data(0),
+		m_vsk_state(0),
+		m_vsk_mi(0),
+		m_byte2_timer(nullptr),
+		m_byte2_pending(0)
+	{
+	}
 
 	void rad_sktv(machine_config& config);
 
 private:
+	optional_ioport m_io_scan1;
+	optional_ioport m_io_scan2;
+
+	uint16_t m_porta_data;
+
+	// Single virtual scanner state machine (one scanner emulated, not two).
+	// Both firmware players probe simultaneously with the same IOA, so the
+	// winning player absorbs our single probe ACK; the other keeps probing.
+	// We ignore all probes once M/I loading starts to prevent FIFO contamination.
+	//   0 = awaiting probe (tx 0x01)
+	//   1 = loading monsters/items (tx 0x80..0xe3, 100 pairs of 2 rx bytes each)
+	//   2 = button polling (tx 0x03, rx BLO BHI)
+	int m_vsk_state;
+	int m_vsk_mi;
+
+	// Deduplication: doPlayer(1) and doPlayer(2) run in the same interrupt tick
+	// and may both write TXBUF=0x01 with the same IOA.  Record when we last
+	// emitted a probe ACK so the second write in the same tick is silently ignored.
+	attotime m_last_probe_time;
+
+	// Delayed second-byte delivery: uart_rx_force fires the baud-rate timer after
+	// the first byte, but WaitCycle (~6 ms) is shorter than one baud period (~17 ms).
+	// We push the second byte ourselves after a short delay (well under 6 ms).
+	emu_timer *m_byte2_timer;
+	uint8_t m_byte2_pending;
+
+	void porta_out_w(offs_t offset, uint16_t data, uint16_t mem_mask = ~0);
+	void uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t mem_mask);
+	TIMER_CALLBACK_MEMBER(byte2_tick);
+
+	void machine_start() override ATTR_COLD;
+	void machine_reset() override ATTR_COLD;
 };
 
-static INPUT_PORTS_START( rad_sktv )
-	/* how does the Scanner connect? probably some serial port with comms protocol, not IO ports?
-	   internal test mode shows 'uart' ports (which currently fail)
+void skannerztv_state::machine_start()
+{
+	spg2xx_game_state::machine_start();
+	save_item(NAME(m_porta_data));
+	save_item(NAME(m_vsk_state));
+	save_item(NAME(m_vsk_mi));
+	save_item(NAME(m_byte2_pending));
 
-	   To access internal test hold DOWN and BUTTON1 together on startup until a coloured screen appears.
-	   To cycle through the tests again hold DOWN and press BUTTON1 */
+	m_byte2_timer = timer_alloc(FUNC(skannerztv_state::byte2_tick), this);
+
+	// Tap UART TXBUF writes (word addr 0x3d35) so we can reply to the scanner
+	// protocol before the baud timer fires — the firmware's WaitCycle timeout
+	// (6 ticks @ ~1 kHz = ~6 ms) is shorter than one 600-baud bit period (~17 ms).
+	m_maincpu->space(AS_PROGRAM).install_write_tap(
+		0x3d35, 0x3d35, "skz_uart_txbuf",
+		[this](offs_t offset, uint16_t &data, uint16_t mem_mask)
+		{
+			uart_txbuf_tap(offset, data, mem_mask);
+		});
+}
+
+void skannerztv_state::machine_reset()
+{
+	spg2xx_game_state::machine_reset();
+	m_porta_data = 0;
+	m_vsk_state = 0;
+	m_vsk_mi = 0;
+	m_byte2_pending = 0;
+	m_last_probe_time = attotime::never;
+}
+
+// Track IOA writes: bit 0 selects scanner 1, bit 1 selects scanner 2.
+void skannerztv_state::porta_out_w(offs_t offset, uint16_t data, uint16_t mem_mask)
+{
+	m_porta_data = data;
+}
+
+// Delivers the second byte of a two-byte scanner response.
+// We can't push both bytes in the tap callback because uart_rx_force's baud-rate
+// continuation timer would delay byte 2 by ~17 ms — longer than WaitCycle (~6 ms).
+// Instead we push byte 1 in the tap, then schedule this timer for a short delay so
+// byte 2 arrives after byte 1's timer fires but well before WaitCycle expires.
+TIMER_CALLBACK_MEMBER(skannerztv_state::byte2_tick)
+{
+	m_maincpu->uart_rx_force(m_byte2_pending);
+	m_byte2_pending = 0;
+}
+
+// Write tap on UART TXBUF (word addr 0x3d35): fires synchronously when the firmware
+// writes to TxBuf, before the baud timer starts.  This sidesteps the timing mismatch
+// where WaitCycle (~6 ms) expires before a 600-baud byte (~17 ms) could arrive.
+// Protocol (per Tahg's reverse engineering):
+//   0x01 → reply 0x02 (probe/ACK)
+//   (n | 0x80) for n=0..99 → reply HI, LO per M/I slot (zeroed: no scanner storage)
+//   0x03 → reply BLO, BHI (button state)
+void skannerztv_state::uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t mem_mask)
+{
+	uint8_t tx = data & 0xff;
+	logerror("uart_txbuf_tap: tx=%02x porta=%04x state=%d mi=%d\n", tx, m_porta_data, m_vsk_state, m_vsk_mi);
+
+	if (tx == 0x01)
+	{
+		// Only respond during probe phase. Once M/I loading starts we ignore all
+		// further probes — the "losing" player (which didn't get the probe ACK) will
+		// keep re-probing, and responding would inject spurious 0x02 bytes into the
+		// shared UARTBuffer and corrupt the winning player's M/I data stream.
+		//
+		// Dedup: doPlayer(1) and doPlayer(2) run back-to-back in the same ~1 kHz
+		// interrupt, both writing TXBUF=0x01 at the same machine timestamp.  We only
+		// push one ACK per distinct timestamp so the shared UARTBuffer gets exactly
+		// one 0x02 byte (consumed by whichever player's state-1 check runs first).
+		if (m_vsk_state == 0)
+		{
+			attotime now = machine().time();
+			if (now != m_last_probe_time)
+			{
+				m_last_probe_time = now;
+				m_vsk_state = 1;
+				m_vsk_mi = 0;
+				m_maincpu->uart_rx_force(0x02);
+			}
+		}
+	}
+	else if (tx == 0x03)
+	{
+		// Button poll: BLO immediately, BHI (unused) via timer.
+		// Respond regardless of vsk_state — once at least one scanner connects the
+		// firmware cycles between M/I and button polling indefinitely.
+		int ch = (m_porta_data & 2) ? 1 : 0;
+		optional_ioport &scan = (ch == 0) ? m_io_scan1 : m_io_scan2;
+		uint8_t blo = scan.found() ? (scan->read() & 0x3f) : 0;
+		m_maincpu->uart_rx_force(blo);
+		m_byte2_pending = 0x00;
+		m_byte2_timer->adjust(attotime::from_usec(500));
+	}
+	else if (tx >= 0x80 && tx <= 0xe3 && m_vsk_state == 1)
+	{
+		// M/I slot: HI immediately, LO via timer.
+		m_maincpu->uart_rx_force(0x00);
+		m_byte2_pending = 0x00;
+		m_byte2_timer->adjust(attotime::from_usec(500));
+		if (++m_vsk_mi >= 100)
+			m_vsk_state = 2;
+	}
+}
+
+static INPUT_PORTS_START( rad_sktv )
+	/* Console GPIO buttons (IOA port, active-LOW).
+	   To access internal test mode: hold DOWN and BUTTON1 at startup until a
+	   coloured screen appears; press BUTTON1 to cycle through tests. */
 
 	PORT_START("P1")
 	PORT_DIPNAME( 0x0001, 0x0001, "IN0" )
@@ -321,8 +465,8 @@ static INPUT_PORTS_START( rad_sktv )
 	PORT_DIPNAME( 0x0002, 0x0002, DEF_STR( Unknown ) )
 	PORT_DIPSETTING(      0x0002, DEF_STR( Off ) )
 	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_BIT( 0x0004, IP_ACTIVE_LOW, IPT_JOYSTICK_LEFT )
-	PORT_BIT( 0x0008, IP_ACTIVE_LOW, IPT_JOYSTICK_RIGHT )
+	PORT_BIT( 0x0004, IP_ACTIVE_LOW, IPT_JOYSTICK_RIGHT )
+	PORT_BIT( 0x0008, IP_ACTIVE_LOW, IPT_JOYSTICK_DOWN )
 	PORT_BIT( 0x0010, IP_ACTIVE_LOW, IPT_JOYSTICK_UP )
 	PORT_DIPNAME( 0x0020, 0x0020, DEF_STR( Unknown ) )
 	PORT_DIPSETTING(      0x0020, DEF_STR( Off ) )
@@ -330,9 +474,9 @@ static INPUT_PORTS_START( rad_sktv )
 	PORT_DIPNAME( 0x0040, 0x0040, DEF_STR( Unknown ) )
 	PORT_DIPSETTING(      0x0040, DEF_STR( Off ) )
 	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_BIT( 0x0080, IP_ACTIVE_LOW, IPT_JOYSTICK_DOWN )
-	PORT_BIT( 0x0100, IP_ACTIVE_LOW, IPT_BUTTON1 )
-	PORT_BIT( 0x0200, IP_ACTIVE_LOW, IPT_BUTTON2 )
+	PORT_BIT( 0x0080, IP_ACTIVE_LOW, IPT_JOYSTICK_LEFT )
+	PORT_BIT( 0x0100, IP_ACTIVE_LOW, IPT_BUTTON1 ) PORT_NAME("B")
+	PORT_BIT( 0x0200, IP_ACTIVE_LOW, IPT_BUTTON2 ) PORT_NAME("A")
 	PORT_DIPNAME( 0x0400, 0x0400, DEF_STR( Unknown ) )
 	PORT_DIPSETTING(      0x0400, DEF_STR( Off ) )
 	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
@@ -353,57 +497,30 @@ static INPUT_PORTS_START( rad_sktv )
 	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
 
 	PORT_START("P2")
-	PORT_DIPNAME( 0x0001, 0x0001, "IN1" )
-	PORT_DIPSETTING(      0x0001, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0002, 0x0002, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0002, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0004, 0x0004, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0004, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0008, 0x0008, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0008, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0010, 0x0010, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0010, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0020, 0x0020, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0020, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0040, 0x0040, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0040, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0080, 0x0080, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0080, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0100, 0x0100, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0100, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0200, 0x0200, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0200, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0400, 0x0400, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0400, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x0800, 0x0800, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x0800, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x1000, 0x1000, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x1000, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x2000, 0x2000, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x2000, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x4000, 0x4000, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x4000, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
-	PORT_DIPNAME( 0x8000, 0x8000, DEF_STR( Unknown ) )
-	PORT_DIPSETTING(      0x8000, DEF_STR( Off ) )
-	PORT_DIPSETTING(      0x0000, DEF_STR( On ) )
+	PORT_BIT( 0xffff, IP_ACTIVE_HIGH, IPT_UNUSED )
 
 	PORT_START("P3")
 	PORT_BIT( 0xffff, IP_ACTIVE_HIGH, IPT_UNUSED )
+
+	/* Scanner UART buttons, delivered as BLO byte in response to command 0x03.
+	   BLO bits: 0=Up, 1=Down, 2=B, 3=A, 4=Left, 5=Right (active-high, 1=pressed). */
+	PORT_START("SCAN1")
+	PORT_BIT( 0x01, IP_ACTIVE_HIGH, IPT_JOYSTICK_UP )    PORT_PLAYER(1) PORT_NAME("Scanner 1 Up")
+	PORT_BIT( 0x02, IP_ACTIVE_HIGH, IPT_JOYSTICK_DOWN )  PORT_PLAYER(1) PORT_NAME("Scanner 1 Down")
+	PORT_BIT( 0x04, IP_ACTIVE_HIGH, IPT_BUTTON4 )        PORT_PLAYER(1) PORT_NAME("Scanner 1 B")
+	PORT_BIT( 0x08, IP_ACTIVE_HIGH, IPT_BUTTON3 )        PORT_PLAYER(1) PORT_NAME("Scanner 1 A")
+	PORT_BIT( 0x10, IP_ACTIVE_HIGH, IPT_JOYSTICK_LEFT )  PORT_PLAYER(1) PORT_NAME("Scanner 1 Left")
+	PORT_BIT( 0x20, IP_ACTIVE_HIGH, IPT_JOYSTICK_RIGHT ) PORT_PLAYER(1) PORT_NAME("Scanner 1 Right")
+	PORT_BIT( 0xc0, IP_ACTIVE_HIGH, IPT_UNUSED )
+
+	PORT_START("SCAN2")
+	PORT_BIT( 0x01, IP_ACTIVE_HIGH, IPT_JOYSTICK_UP )    PORT_PLAYER(2) PORT_NAME("Scanner 2 Up")
+	PORT_BIT( 0x02, IP_ACTIVE_HIGH, IPT_JOYSTICK_DOWN )  PORT_PLAYER(2) PORT_NAME("Scanner 2 Down")
+	PORT_BIT( 0x04, IP_ACTIVE_HIGH, IPT_BUTTON4 )        PORT_PLAYER(2) PORT_NAME("Scanner 2 B")
+	PORT_BIT( 0x08, IP_ACTIVE_HIGH, IPT_BUTTON3 )        PORT_PLAYER(2) PORT_NAME("Scanner 2 A")
+	PORT_BIT( 0x10, IP_ACTIVE_HIGH, IPT_JOYSTICK_LEFT )  PORT_PLAYER(2) PORT_NAME("Scanner 2 Left")
+	PORT_BIT( 0x20, IP_ACTIVE_HIGH, IPT_JOYSTICK_RIGHT ) PORT_PLAYER(2) PORT_NAME("Scanner 2 Right")
+	PORT_BIT( 0xc0, IP_ACTIVE_HIGH, IPT_UNUSED )
 INPUT_PORTS_END
 
 void skannerztv_state::rad_sktv(machine_config &config)
@@ -414,8 +531,13 @@ void skannerztv_state::rad_sktv(machine_config &config)
 	spg2xx_base(config);
 
 	m_maincpu->porta_in().set(FUNC(skannerztv_state::base_porta_r));
+	m_maincpu->porta_out().set(FUNC(skannerztv_state::porta_out_w));
 	m_maincpu->portb_in().set(FUNC(skannerztv_state::base_portb_r));
 	m_maincpu->portc_in().set(FUNC(skannerztv_state::base_portc_r));
+
+	// Scanner UART responses are handled via a write tap on TXBUF (0x3d35)
+	// installed in machine_start(), not through uart_tx callback.
+
 	//m_maincpu->i2c_w().set(FUNC(skannerztv_state::i2c_w));
 	//m_maincpu->i2c_r().set(FUNC(skannerztv_state::i2c_r));
 }

@@ -221,6 +221,18 @@ void spg2xx_io_device::uart_rx(uint8_t data)
 	}
 }
 
+// Bypass RxEn (bit 6) and baud-rate delay.  Used for peripherals whose
+// firmware disables RxEn during TX and whose WaitCycle timeout is shorter
+// than the baud period (e.g. Skannerz TV at 600 baud / 6 ms timeout).
+void spg2xx_io_device::uart_rx_force(uint8_t data)
+{
+	LOGMASKED(LOG_UART, "uart_rx_force: Pushing %02x into receive FIFO immediately\n", data);
+	m_uart_rx_fifo[m_uart_rx_fifo_end] = data;
+	m_uart_rx_fifo_end = (m_uart_rx_fifo_end + 1) % std::size(m_uart_rx_fifo);
+	m_uart_rx_fifo_count++;
+	m_uart_rx_timer->adjust(attotime::zero);
+}
+
 void spg2xx_io_device::set_spi_irq(bool set)
 {
 	const uint16_t old = IO_IRQ_STATUS;
@@ -1190,6 +1202,13 @@ void spg2xx_io_device::io_extended_w(offs_t offset, uint16_t data)
 		{
 			m_uart_rx_available = false;
 			m_io_regs[REG_UART_RXBUF] = 0;
+		}
+		else if (BIT(changed, 6) && m_uart_rx_fifo_count > 0)
+		{
+			// RxEn just transitioned 0→1 with FIFO bytes pending.  Re-arm delivery so
+			// bytes pushed while RxEn was low (e.g. half-duplex TX phase) are not lost.
+			if (m_uart_rx_timer->remaining() == attotime::never)
+				m_uart_rx_timer->adjust(attotime::zero);
 		}
 		if (BIT(changed, 7))
 		{
