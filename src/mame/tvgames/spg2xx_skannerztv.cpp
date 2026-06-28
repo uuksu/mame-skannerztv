@@ -304,6 +304,7 @@ public:
 		spg2xx_game_state(mconfig, type, tag),
 		m_io_scan1(*this, "SCAN1"),
 		m_io_scan2(*this, "SCAN2"),
+		m_io_p2scan(*this, "P2SCAN"),
 		m_porta_data(0),
 		m_vsk_state(0),
 		m_vsk_mi(0),
@@ -318,6 +319,7 @@ public:
 private:
 	optional_ioport m_io_scan1;
 	optional_ioport m_io_scan2;
+	optional_ioport m_io_p2scan;
 
 	uint16_t m_porta_data;
 
@@ -353,6 +355,17 @@ private:
 	// value; entries listed here are verified non-empty in the ROM table.
 	// Slots  0-79: monster types; slots 80-99: item types.
 	static const uint16_t s_mi_cheat[100];
+
+	bool scanner2_connected() const { return !m_io_p2scan.found() || (m_io_p2scan->read() & 1); }
+	// Write byte_1238 bit 1 directly into firmware RAM so 0x1d261 sees both
+	// player bits set and clears them, re-enabling player 1 button polling.
+	// Used in single-scanner mode instead of going through the full player 2
+	// M/I loading protocol — the game never sees a second scanner character.
+	void synthetic_p2_connect()
+	{
+		auto &spc = m_maincpu->space(AS_PROGRAM);
+		spc.write_word(0x1238, spc.read_word(0x1238) | 0x02);
+	}
 
 	uint16_t skz_porta_r();
 	void porta_out_w(offs_t offset, uint16_t data, uint16_t mem_mask = ~0);
@@ -426,6 +439,11 @@ TIMER_CALLBACK_MEMBER(skannerztv_state::byte2_tick)
 {
 	m_maincpu->uart_rx_force(m_byte2_pending);
 	m_byte2_pending = 0;
+	// In single-scanner mode, re-set byte_1238 bit 1 after each BLO delivery.
+	// Player 1's case 2 will set bit 0; with both bits set, 0x1d261 fires and
+	// clears them, re-enabling the next player 1 button poll.
+	if (!scanner2_connected())
+		synthetic_p2_connect();
 }
 
 // Monster/item type IDs for all 100 M/I slots.
@@ -475,11 +493,15 @@ void skannerztv_state::uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t me
 
 	if (tx == 0x01)
 	{
-		// State 0: player 1 initial probe.
-		// State 2: player 2 probe (after player 1 connected, IRQ now only calls
-		//   doPlayer(2)).  Re-enter M/I loading so player 2 connects too, which
-		//   lets 0x1d261 see both bits set and re-enable button polling.
-		if (m_vsk_state == 0 || m_vsk_state == 2)
+		// State 0: player 1 initial probe → ACK and begin M/I loading.
+		// State 2: player 2 probe (byte_1238 bit 0 set, IRQ now calls doPlayer(2)).
+		//   Connected mode: re-enter M/I loading for player 2; firmware sets bit 1
+		//     after its 100 slots, giving 0x1d261 both bits → button polling resumes.
+		//   Single-scanner mode: skip the full protocol and write byte_1238 bit 1
+		//     directly into firmware RAM.  0x1d261 fires on the next game frame,
+		//     clears both bits, and player 1 button polling begins.  Player 2 case 4
+		//     is never reached so no second scanner character appears in the game.
+		if (m_vsk_state == 0)
 		{
 			attotime now = machine().time();
 			if (now != m_last_probe_time)
@@ -488,6 +510,24 @@ void skannerztv_state::uart_txbuf_tap(offs_t offset, uint16_t &data, uint16_t me
 				m_vsk_state = 1;
 				m_vsk_mi = 0;
 				m_maincpu->uart_rx_force(0x02);
+			}
+		}
+		else if (m_vsk_state == 2)
+		{
+			if (scanner2_connected())
+			{
+				attotime now = machine().time();
+				if (now != m_last_probe_time)
+				{
+					m_last_probe_time = now;
+					m_vsk_state = 1;
+					m_vsk_mi = 0;
+					m_maincpu->uart_rx_force(0x02);
+				}
+			}
+			else
+			{
+				synthetic_p2_connect();
 			}
 		}
 	}
@@ -609,6 +649,11 @@ static INPUT_PORTS_START( rad_sktv )
 	PORT_BIT( 0x10, IP_ACTIVE_HIGH, IPT_JOYSTICK_LEFT )  PORT_PLAYER(1) PORT_NAME("Scanner 1 Left")
 	PORT_BIT( 0x20, IP_ACTIVE_HIGH, IPT_JOYSTICK_RIGHT ) PORT_PLAYER(1) PORT_NAME("Scanner 1 Right")
 	PORT_BIT( 0xc0, IP_ACTIVE_HIGH, IPT_UNUSED )
+
+	PORT_START("P2SCAN")
+	PORT_DIPNAME( 0x01, 0x01, "Scanner 2" )
+	PORT_DIPSETTING(    0x01, "Connected (2-player)" )
+	PORT_DIPSETTING(    0x00, "Disconnected (1-player)" )
 
 	PORT_START("SCAN2")
 	PORT_BIT( 0x01, IP_ACTIVE_HIGH, IPT_JOYSTICK_UP )    PORT_PLAYER(2) PORT_NAME("Scanner 2 Up")
