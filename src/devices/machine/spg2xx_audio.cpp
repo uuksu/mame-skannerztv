@@ -40,11 +40,18 @@ DEFINE_DEVICE_TYPE(SUNPLUS_GCM394_AUDIO, sunplus_gcm394_audio_device, "gcm394_au
 #define VERBOSE             (0)
 #include "logmacro.h"
 
-#define SPG_DEBUG_AUDIO     (0)
-#define SPG_LOG_ADPCM36     (0)
+#define SPG_DEBUG_AUDIO         (0)
+#define SPG_LOG_ADPCM36         (0)
+#define SPG_LOG_AUDIO_CHANNELS  (0)  // Set to 1: dumps per-channel decoded PCM as WAV files
 
 #if SPG_LOG_ADPCM36
 static FILE *adpcm_file[16] = {};
+#endif
+
+#if SPG_LOG_AUDIO_CHANNELS
+#include "util/wavwrite.h"
+static wav_file_ptr ch_wav[16];
+static int ch_wav_count[16];
 #endif
 
 spg2xx_audio_device::spg2xx_audio_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, uint32_t clock)
@@ -1001,6 +1008,13 @@ inline void spg2xx_audio_device::start_channel(const uint32_t channel)
 	{
 		memset(m_adpcm36_state + channel, 0, sizeof(adpcm36_state));
 	}
+
+#if SPG_LOG_AUDIO_CHANNELS
+	if (ch_wav[channel]) ch_wav[channel].reset();
+	char ch_fname[64];
+	snprintf(ch_fname, sizeof(ch_fname), "sktv_ch%02d_%03d.wav", channel, ch_wav_count[channel]++);
+	ch_wav[channel] = wav_open(ch_fname, std::max(1, (int)(m_channel_rate[channel] + 0.5)), 1);
+#endif
 }
 
 inline void spg2xx_audio_device::stop_channel(const uint32_t channel)
@@ -1016,6 +1030,9 @@ inline void spg2xx_audio_device::stop_channel(const uint32_t channel)
 		fclose(adpcm_file[channel]);
 		adpcm_file[channel] = nullptr;
 	}
+#endif
+#if SPG_LOG_AUDIO_CHANNELS
+	if (ch_wav[channel]) ch_wav[channel].reset();
 #endif
 }
 
@@ -1246,6 +1263,13 @@ bool spg2xx_audio_device::fetch_sample(const uint32_t channel)
 		}
 		m_sample_count[channel]++;
 	}
+
+#if SPG_LOG_AUDIO_CHANNELS
+	{
+		int16_t s = (int16_t)(m_audio_regs[wave_data_reg] ^ 0x8000);
+		if (ch_wav[channel]) wav_add_data_16(*ch_wav[channel], &s, 1);
+	}
+#endif
 
 	return true;
 }

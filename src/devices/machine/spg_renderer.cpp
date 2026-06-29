@@ -4,6 +4,48 @@
 #include "emu.h"
 #include "spg_renderer.h"
 
+#define SPG_LOG_TILES (0)  // Set to 1: dumps each unique rendered tile as a PPM file
+
+#if SPG_LOG_TILES
+#include <cstdio>
+#include <set>
+static std::set<uint64_t> s_seen_tiles;
+
+static void dump_tile(const char *fname, uint32_t gfx_addr, uint32_t tile_w, uint32_t tile_h,
+                      uint32_t nc_bpp, uint32_t bits_per_row, uint32_t palette_offset,
+                      address_space &spc, uint16_t *paletteram)
+{
+    FILE *f = fopen(fname, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%u %u\n255\n", tile_w, tile_h);
+    for (uint32_t ty = 0; ty < tile_h; ty++)
+    {
+        uint32_t m = gfx_addr + bits_per_row * ty;
+        uint32_t bits = 0, nbits = 0;
+        for (uint32_t tx = 0; tx < tile_w; tx++)
+        {
+            bits <<= nc_bpp;
+            if (nbits < nc_bpp)
+            {
+                uint16_t b = spc.read_word(m++ & 0x3fffff);
+                b = (b << 8) | (b >> 8);
+                bits |= b << (nc_bpp - nbits);
+                nbits += 16;
+            }
+            nbits -= nc_bpp;
+            uint32_t pal = palette_offset + (bits >> 16);
+            bits &= 0xffff;
+            uint16_t rgb = paletteram[pal & 0xff];
+            uint8_t r = (rgb >> 10) & 0x1f; r = (r << 3) | (r >> 2);
+            uint8_t g = (rgb >>  5) & 0x1f; g = (g << 3) | (g >> 2);
+            uint8_t b8 = (rgb >>  0) & 0x1f; b8 = (b8 << 3) | (b8 >> 2);
+            fputc(r, f); fputc(g, f); fputc(b8, f);
+        }
+    }
+    fclose(f);
+}
+#endif
+
 DEFINE_DEVICE_TYPE(SPG_RENDERER, spg_renderer_device, "spg_renderer", "SunPlus SPG2xx video rendering")
 
 spg_renderer_device::spg_renderer_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, uint32_t clock) :
@@ -404,6 +446,20 @@ void spg_renderer_device::draw_page(const rectangle &cliprect, uint32_t scanline
 		palette_offset <<= nc_bpp;
 
 		const int drawx = (x0 * tile_w) - (realxscroll & (tile_w - 1));
+
+#if SPG_LOG_TILES
+		{
+			const uint32_t gfx_addr = tilegfxdata_addr_full + words_per_tile * tile;
+			const uint64_t key = ((uint64_t)gfx_addr << 16) | ((uint64_t)nc_bpp << 12) | palette_offset;
+			if (s_seen_tiles.insert(key).second)
+			{
+				char fname[80];
+				snprintf(fname, sizeof(fname), "tile_%06x_b%u_p%03x.ppm", gfx_addr, nc_bpp, palette_offset);
+				dump_tile(fname, gfx_addr, tile_w, tile_h, nc_bpp, bits_per_row, palette_offset, spc, paletteram);
+			}
+		}
+#endif
+
 		draw_tilestrip(screenwidth, drawwidthmask, blend, flip_x, cliprect, tile_h, tile_w, tilegfxdata_addr_full, tile, tile_scanline, drawx, flip_y, palette_offset, nc_bpp, bits_per_row, words_per_tile, spc, paletteram, blendlevel);
 	}
 }
@@ -467,6 +523,19 @@ void spg_renderer_device::draw_sprite(const rectangle &cliprect, uint32_t scanli
 	// the Circuit Racing game in PDC100 needs this or some graphics have bad colours at the edges when turning as it leaves stray lower bits set
 	palette_offset >>= nc_bpp;
 	palette_offset <<= nc_bpp;
+
+#if SPG_LOG_TILES
+	{
+		const uint32_t gfx_addr = tilegfxdata_addr + words_per_tile * tile;
+		const uint64_t key = ((uint64_t)gfx_addr << 16) | ((uint64_t)nc_bpp << 12) | palette_offset;
+		if (s_seen_tiles.insert(key).second)
+		{
+			char fname[80];
+			snprintf(fname, sizeof(fname), "tile_%06x_b%u_p%03x.ppm", gfx_addr, nc_bpp, palette_offset);
+			dump_tile(fname, gfx_addr, tile_w, tile_h, nc_bpp, bits_per_row, palette_offset, spc, paletteram);
+		}
+	}
+#endif
 
 	if (firstline < lastline)
 	{
