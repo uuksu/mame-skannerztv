@@ -1,0 +1,12 @@
+// license:BSD-3-Clause
+// copyright-holders:Ryan Holtz, David Haywood
+/*******************************************************************************
+
+    sktv.lst
+
+    Machine list for the Skannerz TV WebAssembly build.
+
+*******************************************************************************/
+
+@source:tvgames/spg2xx_skannerztv.cpp
+rad_sktv

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Skannerz TV — MAME WebAssembly</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #111;
+      color: #ddd;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 16px;
+    }
+
+    h1 { font-size: 1.4rem; letter-spacing: 0.05em; margin-bottom: 8px; color: #f90; }
+
+    #status {
+      font-size: 0.85rem; color: #aaa; margin-bottom: 10px;
+      min-height: 1.2em; text-align: center;
+    }
+
+    #canvas-wrap {
+      position: relative; width: 100%; max-width: 800px;
+      background: #000; border: 2px solid #333;
+    }
+
+    #canvas {
+      display: block; width: 100%; height: auto;
+      image-rendering: pixelated; image-rendering: crisp-edges;
+    }
+
+    #overlay {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 16px; background: rgba(0,0,0,0.88);
+    }
+
+    #overlay p { font-size: 0.9rem; color: #ccc; text-align: center; padding: 0 16px; }
+
+    button {
+      background: #f90; border: none; border-radius: 6px; color: #000;
+      cursor: pointer; font-size: 0.95rem; font-weight: 700;
+      padding: 10px 24px; transition: background 0.15s;
+    }
+    button:hover { background: #ffb733; }
+    button:disabled { background: #555; color: #888; cursor: default; }
+
+    #controls {
+      display: flex; gap: 10px; margin-top: 10px;
+      flex-wrap: wrap; justify-content: center;
+    }
+    #controls button {
+      font-size: 0.8rem; padding: 7px 14px;
+      background: #333; color: #ddd; border-radius: 4px;
+    }
+    #controls button:hover { background: #444; }
+
+    #keymap { max-width: 800px; width: 100%; margin-top: 16px; font-size: 0.78rem; color: #888; border-collapse: collapse; }
+    #keymap td { padding: 4px 10px; border-bottom: 1px solid #222; }
+    #keymap td:first-child { font-weight: 600; color: #bbb; }
+    .km-section { color: #555 !important; padding-top: 12px !important; font-size: 0.75rem !important; }
+
+    #progress-bar-wrap {
+      width: 200px; height: 6px; background: #333; border-radius: 3px; overflow: hidden;
+      display: none;
+    }
+    #progress-bar {
+      height: 100%; width: 0%; background: #f90; transition: width 0.2s;
+    }
+
+    #log {
+      max-width: 800px; width: 100%; margin-top: 12px;
+      background: #1a1a1a; border: 1px solid #333; border-radius: 4px;
+      color: #f88; font-family: monospace; font-size: 0.72rem;
+      max-height: 120px; overflow-y: auto; padding: 6px 8px;
+      white-space: pre-wrap; word-break: break-all;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Skannerz TV</h1>
+  <div id="status">Ready.</div>
+
+  <div id="canvas-wrap">
+    <canvas id="canvas" width="320" height="240" tabindex="0"
+            oncontextmenu="return false;"></canvas>
+    <div id="overlay">
+      <p>Skannerz TV emulated in your browser via WebAssembly.</p>
+      <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+      <button id="start-btn">&#9654; Play</button>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <div id="controls">
+    <button id="fullscreen-btn">&#x26F6; Fullscreen</button>
+    <button id="reset-btn"     disabled>&#x21BA; Reset</button>
+    <button id="pause-btn"     disabled>&#x23F8; Pause</button>
+    <button id="mute-btn"      disabled>&#x1F507; Mute</button>
+  </div>
+
+  <table id="keymap"><tbody>
+    <tr><td class="km-section" colspan="2">PLAYER 1</td></tr>
+    <tr><td>&#x2191; &#x2193; &#x2190; &#x2192;</td><td>D-Pad</td></tr>
+    <tr><td>Z / X</td><td>Button 1 / 2</td></tr>
+    <tr><td class="km-section" colspan="2">PLAYER 2</td></tr>
+    <tr><td>W A S D</td><td>D-Pad</td></tr>
+    <tr><td>Q / E</td><td>Button 1 / 2</td></tr>
+    <tr><td class="km-section" colspan="2">EMULATOR</td></tr>
+    <tr><td>5</td><td>Coin (P1)</td></tr>
+    <tr><td>1 / 2</td><td>Start P1 / P2</td></tr>
+    <tr><td>F11</td><td>Fullscreen</td></tr>
+    <tr><td>Tab</td><td>MAME menu</td></tr>
+    <tr><td>Esc</td><td>Quit</td></tr>
+  </tbody></table>
+
+  <script>
+  (function () {
+    'use strict';
+
+    var canvas       = document.getElementById('canvas');
+    var overlay      = document.getElementById('overlay');
+    var statusEl     = document.getElementById('status');
+    var startBtn     = document.getElementById('start-btn');
+    var resetBtn     = document.getElementById('reset-btn');
+    var pauseBtn     = document.getElementById('pause-btn');
+    var muteBtn      = document.getElementById('mute-btn');
+    var fsBtn        = document.getElementById('fullscreen-btn');
+    var progressWrap = document.getElementById('progress-bar-wrap');
+    var progressBar  = document.getElementById('progress-bar');
+    var logEl        = document.getElementById('log');
+
+    var muted  = false;
+    var paused = false;
+
+    function setStatus(msg) { statusEl.textContent = msg || ''; }
+    function setProgress(pct) {
+      progressWrap.style.display = 'block';
+      progressBar.style.width = pct + '%';
+    }
+
+    // Intercept console.warn (MAME stderr) and display on-page.
+    (function () {
+      var origWarn = console.warn.bind(console);
+      console.warn = function () {
+        origWarn.apply(console, arguments);
+        var msg = Array.prototype.join.call(arguments, ' ');
+        logEl.style.display = 'block';
+        logEl.textContent += msg + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+    }());
+
+    // ── Fullscreen ─────────────────────────────────────────────────────
+    function requestFullscreen() {
+      var wrap = document.getElementById('canvas-wrap');
+      (wrap.requestFullscreen || wrap.webkitRequestFullscreen || function(){}).call(wrap);
+    }
+    fsBtn.addEventListener('click', requestFullscreen);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'F11') { e.preventDefault(); requestFullscreen(); }
+    });
+
+    // ── Game key suppression ───────────────────────────────────────────
+    var GAME_KEYS = new Set([
+      'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+      'z','x','Z','X','q','e','Q','E','w','a','s','d','W','A','S','D',
+      '1','2','5'
+    ]);
+    canvas.addEventListener('keydown', function (e) {
+      if (e.key !== 'F11' && GAME_KEYS.has(e.key)) e.preventDefault();
+    });
+
+    // ── Start ──────────────────────────────────────────────────────────
+    startBtn.addEventListener('click', function () {
+      startBtn.disabled = true;
+
+      // Lock the canvas to WebGL2 before MAME loads.
+      // SDL2's Emscripten port calls Browser.createContext(canvas, false) which
+      // creates a 2D context.  Once a 2D context exists, canvas.getContext('webgl2')
+      // returns null and BGFX can never initialise.  Grabbing WebGL2 first prevents
+      // the 2D context from being created (per HTML Canvas spec §4.12.4.1).
+      var glCheck = canvas.getContext('webgl2', {
+        alpha: true, depth: true, stencil: true,
+        antialias: false, premultipliedAlpha: false
+      });
+      if (!glCheck) {
+        setStatus('Error: WebGL2 is not supported by your browser.');
+        startBtn.disabled = false;
+        return;
+      }
+
+      setStatus('Loading…');
+      setProgress(5);
+
+      // Set Module before loading mamesktv.js so it picks it up.
+      window.Module = {
+        canvas: canvas,
+
+        preRun: [function () {
+          // Async-fetch the ROM while MAME's WASM initialises.
+          // addRunDependency prevents MAME from starting until we're done.
+          Module.addRunDependency('fetchRom');
+
+          setStatus('Downloading ROM…');
+          setProgress(30);
+
+          fetch('rad_sktv.zip')
+            .then(function (resp) {
+              if (!resp.ok) throw new Error('HTTP ' + resp.status);
+              // Use streaming to show download progress if available.
+              var contentLength = resp.headers.get('Content-Length');
+              if (!contentLength || !resp.body) return resp.arrayBuffer();
+              var total   = parseInt(contentLength, 10);
+              var loaded  = 0;
+              var reader  = resp.body.getReader();
+              var chunks  = [];
+              function pump() {
+                return reader.read().then(function (chunk) {
+                  if (chunk.done) {
+                    var merged = new Uint8Array(loaded);
+                    var offset = 0;
+                    chunks.forEach(function (c) { merged.set(c, offset); offset += c.length; });
+                    return merged.buffer;
+                  }
+                  chunks.push(chunk.value);
+                  loaded += chunk.value.length;
+                  setProgress(30 + Math.round(loaded / total * 40));
+                  return pump();
+                });
+              }
+              return pump();
+            })
+            .then(function (buf) {
+              setStatus('Preparing filesystem…');
+              setProgress(75);
+              try { FS.mkdir('/roms'); } catch(e) {}
+              FS.writeFile('/roms/rad_sktv.zip', new Uint8Array(buf));
+              ['/cfg','/nvram','/inp','/snap','/sta'].forEach(function (d) {
+                try { FS.mkdir(d); } catch(e) {}
+              });
+              setProgress(85);
+              Module.removeRunDependency('fetchRom');
+            })
+            .catch(function (err) {
+              setStatus('Error loading ROM: ' + err.message);
+              console.error(err);
+              // Don't call removeRunDependency — MAME will stay paused at the error.
+            });
+        }],
+
+        postRun: [],
+
+        'arguments': [
+          'rad_sktv',
+          '-rompath',            '/roms',
+          '-cfg_directory',      '/cfg',
+          '-nvram_directory',    '/nvram',
+          '-snapshot_directory', '/snap',
+          '-input_directory',    '/inp',
+          '-state_directory',    '/sta',
+          '-video',              'bgfx',
+          '-bgfx_screen_chains', 'default',
+          '-skip_gameinfo',
+        ],
+
+        print:    function (t) { console.log(t); },
+        printErr: function (t) { console.warn(t); },
+
+        setStatus: function (text) {
+          // Emscripten sends "Downloading data... (x/y)" during WASM fetch.
+          if (text) setStatus(text);
+          else {
+            // Empty string means "done".
+            overlay.style.display = 'none';
+            setStatus('Emulator running.');
+            resetBtn.disabled = false;
+            pauseBtn.disabled = false;
+            muteBtn.disabled  = false;
+            canvas.focus();
+          }
+        },
+
+        totalDependencies: 0,
+        monitorRunDependencies: function (left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          if (left) {
+            var done = this.totalDependencies - left;
+            setProgress(85 + Math.round(done / this.totalDependencies * 14));
+            setStatus('Initializing (' + done + '/' + this.totalDependencies + ')…');
+          } else {
+            setProgress(100);
+          }
+        },
+
+        onRuntimeInitialized: function () {
+          setStatus('Starting emulator…');
+        },
+
+        requestFullscreen: function () { requestFullscreen(); },
+      };
+
+      // Load the WASM glue script — Module is already set above.
+      var script = document.createElement('script');
+      script.src = 'mamesktv.js';
+      script.onerror = function () {
+        setStatus('Error: failed to load mamesktv.js');
+        startBtn.disabled = false;
+        progressWrap.style.display = 'none';
+      };
+      document.body.appendChild(script);
+    });
+
+    // ── Control buttons ────────────────────────────────────────────────
+    resetBtn.addEventListener('click', function () {
+      if (window.JSMAME && JSMAME.hard_reset) JSMAME.hard_reset();
+    });
+
+    pauseBtn.addEventListener('click', function () {
+      paused = !paused;
+      if (paused) {
+        if (typeof emscripten_pause_main_loop === 'function') emscripten_pause_main_loop();
+      } else {
+        if (typeof emscripten_resume_main_loop === 'function') emscripten_resume_main_loop();
+      }
+      pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+    });
+
+    muteBtn.addEventListener('click', function () {
+      muted = !muted;
+      if (window.JSMAME) {
+        var machine = JSMAME.get_machine && JSMAME.get_machine();
+        if (machine && JSMAME.sound_manager_mute) {
+          JSMAME.sound_manager_mute(machine, muted ? 1 : 0, 2);
+        }
+      }
+      muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+    });
+
+  }());
+  </script>
+</body>
+</html>
