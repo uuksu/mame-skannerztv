@@ -94,8 +94,11 @@
             oncontextmenu="return false;"></canvas>
     <div id="overlay">
       <p>Skannerz TV emulated in your browser via WebAssembly.</p>
+      <p>This build does not include or fetch the game ROM — choose your own
+         dump of <em>rad_sktv.zip</em> to continue.</p>
       <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
-      <button id="start-btn">&#9654; Play</button>
+      <input type="file" id="rom-input" accept=".zip" style="display:none">
+      <button id="start-btn">&#9654; Load ROM&hellip;</button>
     </div>
   </div>
 
@@ -131,6 +134,7 @@
     var overlay      = document.getElementById('overlay');
     var statusEl     = document.getElementById('status');
     var startBtn     = document.getElementById('start-btn');
+    var romInput     = document.getElementById('rom-input');
     var resetBtn     = document.getElementById('reset-btn');
     var pauseBtn     = document.getElementById('pause-btn');
     var muteBtn      = document.getElementById('mute-btn');
@@ -181,7 +185,16 @@
     });
 
     // ── Start ──────────────────────────────────────────────────────────
+    // The button just opens a native file picker; the real boot sequence
+    // starts from the input's change event once the user has chosen a ROM.
     startBtn.addEventListener('click', function () {
+      romInput.click();
+    });
+
+    romInput.addEventListener('change', function () {
+      var romFile = romInput.files && romInput.files[0];
+      if (!romFile) return;
+
       startBtn.disabled = true;
 
       // Lock the canvas to WebGL2 before MAME loads.
@@ -207,39 +220,15 @@
         canvas: canvas,
 
         preRun: [function () {
-          // Async-fetch the ROM while MAME's WASM initialises.
-          // addRunDependency prevents MAME from starting until we're done.
+          // Read the ROM the user picked from their local disk while MAME's
+          // WASM initialises. addRunDependency prevents MAME from starting
+          // until we're done.
           Module.addRunDependency('fetchRom');
 
-          setStatus('Downloading ROM…');
+          setStatus('Reading ROM…');
           setProgress(30);
 
-          fetch('rad_sktv.zip')
-            .then(function (resp) {
-              if (!resp.ok) throw new Error('HTTP ' + resp.status);
-              // Use streaming to show download progress if available.
-              var contentLength = resp.headers.get('Content-Length');
-              if (!contentLength || !resp.body) return resp.arrayBuffer();
-              var total   = parseInt(contentLength, 10);
-              var loaded  = 0;
-              var reader  = resp.body.getReader();
-              var chunks  = [];
-              function pump() {
-                return reader.read().then(function (chunk) {
-                  if (chunk.done) {
-                    var merged = new Uint8Array(loaded);
-                    var offset = 0;
-                    chunks.forEach(function (c) { merged.set(c, offset); offset += c.length; });
-                    return merged.buffer;
-                  }
-                  chunks.push(chunk.value);
-                  loaded += chunk.value.length;
-                  setProgress(30 + Math.round(loaded / total * 40));
-                  return pump();
-                });
-              }
-              return pump();
-            })
+          romFile.arrayBuffer()
             .then(function (buf) {
               setStatus('Preparing filesystem…');
               setProgress(75);
@@ -252,7 +241,7 @@
               Module.removeRunDependency('fetchRom');
             })
             .catch(function (err) {
-              setStatus('Error loading ROM: ' + err.message);
+              setStatus('Error reading ROM: ' + err.message);
               console.error(err);
               // Don't call removeRunDependency — MAME will stay paused at the error.
             });

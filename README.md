@@ -28,8 +28,9 @@ ship a WebAssembly build of it that runs in a browser.
 - Added optional SPG2xx debug hooks for asset ripping (dumping decoded
   audio channels as WAV and unique rendered tiles as PPM), off by default.
 - Added a minimal Emscripten/WebAssembly build (`sktv` subtarget) targeting
-  `rad_sktv` only, with a browser UI that auto-fetches the ROM, a dev
-  server with the required COOP/COEP headers, and assorted Emscripten 6.x
+  `rad_sktv` only, with a browser UI where the player supplies their own
+  ROM dump (this repo does not include or serve one), a dev server with
+  the required COOP/COEP headers, and assorted Emscripten 6.x
   compatibility fixes.
 - Added `build-wasm.sh` and `build-native.sh` convenience scripts so the
   WASM and native `tvgames` builds can each be run with a single command.

@@ -49,3 +49,6 @@ regtests/chdman/temp
 regtests/jedutil/output
 /CMakeLists.txt
 /samples
+
+# ROM dumps: users must supply their own, never commit these
+/web/sktv/*.zip
