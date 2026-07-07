@@ -1,12 +1,12 @@
 # MAME (Skanner TV fork)
 
-See [original MAME repository ](https://github.com/mamedev/mamehttp://opensource.org/licenses/GPL-2.0).
+See [original MAME repository ](https://github.com/mamedev/mame).
 
 ## Why this fork exists
 
 This fork exists for one purpose: get the Radica **Skannerz TV** (`rad_sktv`)
 driver working, by any means necessary — mostly by brute-forcing the
-reverse-engineering with an AI coding agent — and to rip assets and 
+reverse-engineering with by vibe coding — and to rip assets and 
 ship a WebAssembly build of it that runs in a browser.
 
 ### Changes made in this fork so far
