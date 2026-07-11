@@ -114,16 +114,13 @@
   <table id="keymap"><tbody>
     <tr><td class="km-section" colspan="2">PLAYER 1</td></tr>
     <tr><td>&#x2191; &#x2193; &#x2190; &#x2192;</td><td>D-Pad</td></tr>
-    <tr><td>Z / X</td><td>Button 1 / 2</td></tr>
+    <tr><td>Ctrl / Shift</td><td>Button A / B</td></tr>
     <tr><td class="km-section" colspan="2">PLAYER 2</td></tr>
     <tr><td>W A S D</td><td>D-Pad</td></tr>
-    <tr><td>Q / E</td><td>Button 1 / 2</td></tr>
+    <tr><td>H / G</td><td>Button A / B</td></tr>
     <tr><td class="km-section" colspan="2">EMULATOR</td></tr>
-    <tr><td>5</td><td>Coin (P1)</td></tr>
-    <tr><td>1 / 2</td><td>Start P1 / P2</td></tr>
     <tr><td>F11</td><td>Fullscreen</td></tr>
     <tr><td>Tab</td><td>MAME menu</td></tr>
-    <tr><td>Esc</td><td>Quit</td></tr>
   </tbody></table>
 
   <script>
@@ -177,7 +174,8 @@
     // ── Game key suppression ───────────────────────────────────────────
     var GAME_KEYS = new Set([
       'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
-      'z','x','Z','X','q','e','Q','E','w','a','s','d','W','A','S','D',
+      'Control','Shift',
+      'w','a','s','d','W','A','S','D','h','H','g','G',
       '1','2','5'
     ]);
     canvas.addEventListener('keydown', function (e) {
