@@ -19,6 +19,16 @@ EMSCRIPTEN="$(dirname "$(which emcc)")"
 
 cd "$REPO_DIR"
 
+# On a fresh checkout neither the genie build-file generator nor
+# build/generated/version.cpp exist yet. The top-level makefile's "generate"
+# target normally produces both, but this script drives genie directly, so
+# build them explicitly here. Both rules are no-ops once already up to date.
+echo "=== Building genie ==="
+make genie -j"$(nproc)"
+
+echo "=== Generating build/generated/version.cpp ==="
+make TARGET=mame SUBTARGET=sktv BUILDDIR=build build/generated/version.cpp
+
 echo "=== Generating build files ==="
 mkdir -p build/generated/mame/sktv/
 EMSCRIPTEN="$EMSCRIPTEN" CC=emcc \
