@@ -1165,7 +1165,12 @@ configuration { "asmjs" }
 	else
 		linkoptions {
 			"-s ALLOW_MEMORY_GROWTH=1",
-			"-s INITIAL_MEMORY=24MB"
+			"-s INITIAL_MEMORY=24MB",
+			-- emscripten >=6.0.2 defaults to backing growable memory with a
+			-- JS "resizable" ArrayBuffer, but WebGL2 rejects texImage2D/etc.
+			-- calls with a view over a resizable buffer, breaking rendering.
+			-- Force the old grow-by-reallocation behavior instead.
+			"-s GROWABLE_ARRAYBUFFERS=0",
 		}
 	end
 	archivesplit_size "20"
