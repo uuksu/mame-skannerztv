@@ -27,12 +27,39 @@
 
     #canvas-wrap {
       position: relative; width: 100%; max-width: 800px;
+      aspect-ratio: 4 / 3;
       background: #000; border: 2px solid #333;
     }
 
+    /* SDL's emscripten backend briefly shrinks the canvas to 1x1 to probe
+       whether CSS is sizing it externally, then reads the CSS size back to
+       decide the real resolution. If height here were "auto" (derived from
+       the canvas's own width/height attributes), that probe would catch it
+       mid-1x1 and report back a square size, which SDL then adopts —
+       ignoring -resolution entirely. Deriving height from the wrap's own
+       aspect-ratio instead keeps it stable regardless of the canvas's
+       current attributes. */
     #canvas {
-      display: block; width: 100%; height: auto;
+      display: block; width: 100%; height: 100%;
       image-rendering: pixelated; image-rendering: crisp-edges;
+    }
+
+    /* Browsers reset max-width for the fullscreen element via their UA
+       stylesheet, but our #canvas-wrap id selector outranks it, so without
+       this the box stays pinned to 800px wide and uncentered instead of
+       filling the screen. Size the canvas by content (auto + max-*) here
+       so it's centered and letterboxed to its real aspect ratio instead
+       of stretching to fill the (differently-shaped) wrap box. */
+    #canvas-wrap:fullscreen,
+    #canvas-wrap:-webkit-full-screen {
+      max-width: none; width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    #canvas-wrap:fullscreen #canvas,
+    #canvas-wrap:-webkit-full-screen #canvas {
+      width: auto; height: auto;
+      max-width: 100%; max-height: 100%;
     }
 
     #overlay {
@@ -259,6 +286,7 @@
           '-bgfx_screen_chains', 'default',
           '-skip_gameinfo',
           '-window',
+          '-resolution',         '320x240',
         ],
 
         print:    function (t) { console.log(t); },
