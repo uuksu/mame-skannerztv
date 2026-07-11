@@ -1128,6 +1128,7 @@ configuration { "asmjs" }
 		"--embed-file " .. _MAKE.esc(MAME_DIR) .. "artwork/bgfx@artwork/bgfx",
 		"--embed-file " .. _MAKE.esc(MAME_DIR) .. "artwork/lut-default.png@artwork/lut-default.png",
 		"--embed-file " .. _MAKE.esc(MAME_DIR) .. "artwork/slot-mask.png@artwork/slot-mask.png",
+		"--embed-file " .. _MAKE.esc(MAME_DIR) .. "cfg/rad_sktv.cfg@cfg/rad_sktv.cfg",
 	}
 	if _OPTIONS["OPTIMIZE"]~=nil then
 		if _OPTIONS["OPTIMIZE"]=="3" then

@@ -17,6 +17,7 @@
 !/benchmarks/
 !/artwork/
 !/bgfx/
+!/cfg/
 !/docs/
 !/hash/
 !/hlsl/
@@ -52,3 +53,8 @@ regtests/jedutil/output
 
 # ROM dumps: users must supply their own, never commit these
 /web/sktv/*.zip
+
+# MAME regenerates default.cfg (and would regenerate other per-system cfg)
+# locally on every run; only the curated rad_sktv.cfg default is tracked.
+/cfg/*
+!/cfg/rad_sktv.cfg
