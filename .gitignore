@@ -54,6 +54,12 @@ regtests/jedutil/output
 # ROM dumps: users must supply their own, never commit these
 /web/sktv/*.zip
 
+# WASM build output: regenerate with build-wasm.sh. A multi-MB binary that
+# doesn't delta-compress well, so committing it bloats history fast every
+# time it's rebuilt — history was purged of past copies for this reason.
+/web/sktv/mamesktv.js
+/web/sktv/mamesktv.wasm
+
 # MAME regenerates default.cfg (and would regenerate other per-system cfg)
 # locally on every run; only the curated rad_sktv.cfg default is tracked.
 /cfg/*
